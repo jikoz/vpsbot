@@ -1,109 +1,109 @@
 import discord
-from discord.ext import commands
 from discord import app_commands
-import os
-import subprocess
-import json
-import random
-import string
-from dotenv import load_dotenv
+from discord.ext import commands
+from datetime import timedelta
 
-load_dotenv()
-
-TOKEN = os.getenv("DISCORD_TOKEN")
-DEFAULT_OS = os.getenv("DEFAULT_OS_IMAGE", "ubuntu:22.04")
+TOKEN = "YOUR_BOT_TOKEN"
 
 intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-DATA_FILE = "vps_data.json"
-
-# -------------------- DATABASE --------------------
-
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {"admins": [], "vps": {}}
-    with open(DATA_FILE, "r") as f:
-        return json.load(f)
-
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-data = load_data()
-
-# -------------------- UTILS --------------------
-
-def generate_password(length=10):
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-
-def is_admin(user_id):
-    return str(user_id) in data["admins"]
-
-# -------------------- EVENTS --------------------
-
+# Sync slash commands
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    print(f"Bot ready as {bot.user}")
+    print(f"Logged in as {bot.user}")
 
-# -------------------- ADMIN COMMANDS --------------------
+# ✅ Check if user is Admin
+def is_admin():
+    async def predicate(interaction: discord.Interaction):
+        return interaction.user.guild_permissions.administrator
+    return app_commands.check(predicate)
 
-@bot.tree.command(name="admin_add", description="Add new admin")
-async def admin_add(interaction: discord.Interaction, user: discord.User):
-    if not is_admin(interaction.user.id):
-        return await interaction.response.send_message("Admin only!", ephemeral=True)
+# =========================
+# 🔥 PURGE COMMAND
+# =========================
+@bot.tree.command(name="purge", description="Delete multiple messages")
+@is_admin()
+async def purge(interaction: discord.Interaction, amount: int):
+    await interaction.response.defer(ephemeral=True)
+    await interaction.channel.purge(limit=amount)
+    await interaction.followup.send(f"Deleted {amount} messages.", ephemeral=True)
 
-    data["admins"].append(str(user.id))
-    save_data(data)
-    await interaction.response.send_message("Admin added!")
+# =========================
+# 🔨 BAN COMMAND
+# =========================
+@bot.tree.command(name="ban", description="Ban a member")
+@is_admin()
+async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
+    await member.ban(reason=reason)
+    await interaction.response.send_message(f"{member.mention} has been banned.", ephemeral=True)
 
-@bot.tree.command(name="list_admin", description="List admins")
-async def list_admin(interaction: discord.Interaction):
-    if not is_admin(interaction.user.id):
-        return await interaction.response.send_message("Admin only!", ephemeral=True)
+# =========================
+# 👢 KICK COMMAND
+# =========================
+@bot.tree.command(name="kick", description="Kick a member")
+@is_admin()
+async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
+    await member.kick(reason=reason)
+    await interaction.response.send_message(f"{member.mention} has been kicked.", ephemeral=True)
 
-    await interaction.response.send_message(f"Admins: {data['admins']}")
+# =========================
+# ⏳ TIMEOUT COMMAND
+# =========================
+@bot.tree.command(name="timeout", description="Timeout a member (minutes)")
+@is_admin()
+async def timeout(interaction: discord.Interaction, member: discord.Member, minutes: int):
+    duration = timedelta(minutes=minutes)
+    await member.timeout(duration)
+    await interaction.response.send_message(f"{member.mention} has been timed out for {minutes} minutes.", ephemeral=True)
 
-@bot.tree.command(name="remove_admin", description="Remove admin")
-async def remove_admin(interaction: discord.Interaction, user: discord.User):
-    if not is_admin(interaction.user.id):
-        return await interaction.response.send_message("Admin only!", ephemeral=True)
-
-    data["admins"].remove(str(user.id))
-    save_data(data)
-    await interaction.response.send_message("Admin removed!")
-
-# -------------------- CREATE VPS --------------------
-
-@bot.tree.command(name="create_vps", description="Create VPS (Admin only)")
-async def create_vps(interaction: discord.Interaction, user: discord.User):
-    if not is_admin(interaction.user.id):
-        return await interaction.response.send_message("Admin only!", ephemeral=True)
-
-    container_name = f"vps_{user.id}"
-    password = generate_password()
-
+# =========================
+# 📩 DM COMMAND
+# =========================
+@bot.tree.command(name="dm", description="Send DM to a member")
+@is_admin()
+async def dm(interaction: discord.Interaction, member: discord.Member, message: str):
     try:
-        subprocess.run(["docker", "run", "-dit", "--name", container_name, DEFAULT_OS], check=True)
-        subprocess.run(["docker", "exec", container_name, "bash", "-c",
-                        f"useradd -m user && echo 'user:{password}' | chpasswd"], check=True)
+        await member.send(message)
+        await interaction.response.send_message("DM sent successfully.", ephemeral=True)
+    except:
+        await interaction.response.send_message("Failed to send DM.", ephemeral=True)
 
-        data["vps"][container_name] = {
-            "owner": str(user.id),
-            "password": password,
-            "status": "running"
+# =========================
+# 🎟️ TICKET SETUP
+# =========================
+class TicketButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.green)
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True)
         }
 
-        save_data(data)
-
-        await interaction.response.send_message(
-            f"VPS Created!\nName: `{container_name}`\nUser: `user`\nPassword: `{password}`"
+        channel = await guild.create_text_channel(
+            name=f"ticket-{interaction.user.name}",
+            overwrites=overwrites
         )
 
-    except:
-        await interaction.response.send_message("Failed to create VPS", ephemeral=True)
+        await channel.send(f"{interaction.user.mention} Ticket created!")
+        await interaction.response.send_message("Ticket created!", ephemeral=True)
 
+@bot.tree.command(name="ticket_setup", description="Setup ticket system")
+@is_admin()
+async def ticket_setup(interaction: discord.Interaction):
+    view = TicketButton()
+    await interaction.channel.send("Click below to create a ticket:", view=view)
+    await interaction.response.send_message("Ticket system setup complete.", ephemeral=True)
+
+bot.run(TOKEN)
 # -------------------- LIST VPS --------------------
 
 @bot.tree.command(name="vps_list", description="List VPS (Admin only)")
